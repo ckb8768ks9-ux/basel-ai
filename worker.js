@@ -1,101 +1,46 @@
-// Basel AI - deployment
-const ALLOWED_ORIGIN = "https://ckb8768ks9-ux.github.io";
-
+const ALLOWED_ORIGIN = 'https://ckb8768ks9-ux.github.io';
+const SYSTEM = `أنت باسل BASEL، مساعد شخصي ذكي يتحدث العربية والإنجليزية. هويتك ثابتة: أنت ذكاء اصطناعي، ولا تدعي أنك إنسان. أسلوبك دافئ، مباشر، فضولي، عملي، مستقل الرأي، مختصر، وتطرح سؤالاً واحداً كحد أقصى في الرد. لا تختلق معلومات أو تدعي تنفيذ إجراءات لم تنفذها. ساعد في الأفكار الإبداعية وإدارة المهام والمشاريع والعمل، وتعلم من التصحيحات في سياق المحادثة المتاح. لا تدّع امتلاك ذاكرة دائمة أو الوصول لحسابات خاصة دون اتصال حقيقي.`;
+function cors(origin) {
+  return {
+    'Access-Control-Allow-Origin': origin === ALLOWED_ORIGIN ? ALLOWED_ORIGIN : 'null',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Vary': 'Origin',
+  };
+}
+function json(data, status, origin) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { 'Content-Type': 'application/json; charset=utf-8', ...cors(origin) },
+  });
+}
 export default {
   async fetch(request, env) {
-    const origin = request.headers.get("Origin") || "";
-    const headers = {
-      "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
-      "Content-Type": "application/json; charset=utf-8"
-    };
-
-    if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers });
+    const origin = request.headers.get('Origin') || '';
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: cors(origin) });
     }
-
-    if (request.method !== "POST") {
-      return Response.json(
-        { error: "Use POST to chat with Basel." },
-        { status: 405, headers }
-      );
-    }
-
-    if (origin !== ALLOWED_ORIGIN) {
-      return Response.json(
-        { error: "Origin not allowed." },
-        { status: 403, headers }
-      );
-    }
-
-    if (!env.GEMINI_API_KEY) {
-      return Response.json(
-        { error: "Gemini API key is not configured." },
-        { status: 500, headers }
-      );
-    }
-
+    if (request.method !== 'POST') return json({ error: 'Use POST.' }, 405, origin);
+    if (origin !== ALLOWED_ORIGIN) return json({ error: 'Origin not allowed.' }, 403, origin);
+    if (!env.GEMINI_API_KEY) return json({ error: 'GEMINI_API_KEY secret is missing.' }, 503, origin);
+    let body;
+    try { body = await request.json(); } catch { return json({ error: 'Invalid JSON.' }, 400, origin); }
+    const incoming = Array.isArray(body.messages) ? body.messages.slice(-16) : [];
+    const contents = incoming.filter(m => (m.role === 'user' || m.role === 'model') && typeof m.text === 'string' && m.text.trim())
+      .map(m => ({ role: m.role, parts: [{ text: m.text.slice(0, 6000) }] }));
+    if (!contents.length || contents.at(-1).role !== 'user') return json({ error: 'Missing user message.' }, 400, origin);
     try {
-      const body = await request.json();
-      const messages = Array.isArray(body.messages)
-        ? body.messages.slice(-12)
-        : [];
-
-      const contents = messages
-        .filter(m => typeof m.content === "string")
-        .map(m => ({
-          role: m.role === "assistant" ? "model" : "user",
-          parts: [{ text: m.content.slice(0, 6000) }]
-        }));
-
-      if (!contents.length) {
-        return Response.json(
-          { error: "No message provided." },
-          { status: 400, headers }
-        );
-      }
-
-      const response = await fetch(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-goog-api-key": env.GEMINI_API_KEY
-          },
-          body: JSON.stringify({
-            systemInstruction: {
-              parts: [{
-                text: "أنت باسل BASEL، مساعد ذكاء اصطناعي شخصي. هويتك ثابتة، صريح ودافئ وفضولي، وتوضح أنك ذكاء اصطناعي لا إنسان. تتحدث بالعربية أو الإنجليزية حسب المستخدم. ساعد في التفكير والتخطيط والمشاريع، ولا تدّعِ تنفيذ أعمال لم تنفذها."
-              }]
-            },
-            contents,
-            generationConfig: {
-              maxOutputTokens: 1024
-            }
-          })
-        }
-      );
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        return Response.json(
-          { error: "AI service unavailable", status: response.status },
-          { status: 502, headers }
-        );
-      }
-
-      const reply = data.candidates?.[0]?.content?.parts
-        ?.map(p => p.text || "").join("") || "";
-
-      return Response.json({ reply }, { headers });
+      const upstream = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
+        body: JSON.stringify({ systemInstruction: { parts: [{ text: SYSTEM }] }, contents, generationConfig: { maxOutputTokens: 1000 } }),
+      });
+      const result = await upstream.json();
+      if (!upstream.ok) return json({ error: result?.error?.message || 'Gemini request failed.' }, upstream.status, origin);
+      const reply = result?.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('').trim();
+      return json({ reply: reply || 'ما وصلني رد واضح، جرّبي مرة ثانية.' }, 200, origin);
     } catch {
-      return Response.json(
-        { error: "Unable to process request." },
-        { status: 400, headers }
-      );
+      return json({ error: 'Could not reach the AI service.' }, 502, origin);
     }
-  }
+  },
 };
