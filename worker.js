@@ -1,4 +1,4 @@
-
+// Basel AI - deployment
 const ALLOWED_ORIGIN = "https://ckb8768ks9-ux.github.io";
 
 export default {
